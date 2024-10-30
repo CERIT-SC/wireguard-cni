@@ -28,6 +28,7 @@ import (
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
 	"github.com/containernetworking/cni/pkg/version"
+	cniTypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
@@ -37,7 +38,6 @@ import (
 
 	"github.com/schu/wireguard-cni/pkg/k8sutil"
 	wgnetlink "github.com/schu/wireguard-cni/pkg/netlink"
-	"github.com/schu/wireguard-cni/pkg/util"
 )
 
 func init() {
@@ -127,11 +127,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return err
 	}
-
-	if conf.PrevResult == nil {
-		return fmt.Errorf("must be called as chained plugin")
-	}
-
+	iface := &current.Interface{}
 	var wgConfig wgCNIConfig
 	if conf.KubeConfigPath != "" {
 		clientset, err := k8sutil.NewClientset(conf.KubeConfigPath)
@@ -218,7 +214,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("could not get container net ns handle: %v", err)
 	}
 
-	linkName := "wg" + util.RandString(6)
+	linkName := args.IfName
+	iface.Name = linkName
 
 	linkAttrs := netlink.NewLinkAttrs()
 	linkAttrs.Name = linkName
@@ -262,7 +259,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	if err := netnsNetlinkHandle.AddrAdd(wgLink, addr); err != nil {
-		return fmt.Errorf("could not add address: %v", err)
+	return fmt.Errorf("could not add address: %v", err)
 	}
 
 	if err := netnsNetlinkHandle.LinkSetUp(wgLink); err != nil {
@@ -288,8 +285,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
+	resultIPConfig := &current.IPConfig{
+		Address: net.IPNet{
+                        IP:   sourceIP,
+                        Mask: sourceIPNet.Mask,
+                },
+	}
+
+	result := &current.Result{CNIVersion: conf.CNIVersion, Interfaces: []*current.Interface{iface}}
+	result.IPs = []*current.IPConfig{resultIPConfig}
+
 	// Pass through the result for the next plugin
-	return types.PrintResult(conf.PrevResult, conf.CNIVersion)
+	return cniTypes.PrintResult(result, conf.CNIVersion)
 }
 
 // cmdDel is called for DELETE requests
