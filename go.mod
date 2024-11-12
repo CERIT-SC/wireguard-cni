@@ -6,6 +6,7 @@ require (
 	github.com/containernetworking/cni v0.7.1
 	github.com/vishvananda/netlink v1.1.0
 	github.com/vishvananda/netns v0.0.0-20191106174202-0a2b9b5464df
+        github.com/containernetworking/plugins v0.8.3
 	golang.org/x/crypto v0.0.0-20200414173820-0848c9571904 // indirect
 	golang.org/x/net v0.0.0-20200324143707-d3edc9973b7e // indirect
 	golang.org/x/sys v0.0.0-20200413165638-669c56c373c4
@@ -13,4 +14,9 @@ require (
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20200324154536-ceff61240acf
 	k8s.io/apimachinery v0.17.5
 	k8s.io/client-go v0.17.0
+)
+
+require (
+        github.com/coreos/go-iptables v0.5.0 // indirect
+	github.com/safchain/ethtool v0.0.0-20190326074333-42ed695e3de8 // indirect
 )

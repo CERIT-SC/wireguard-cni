@@ -11,10 +11,13 @@ if [[ -w "${binary_install_path}" ]]; then
   cp /opt/cni/bin/wg-cni "${binary_install_path}/wg-cni"
 fi
 
-readonly kubeconfig_install_path="/host/etc/kubernetes/wg-cni.kubeconfig"
+readonly kubeconfig_install_path="/host/etc/cni/net.d/wg-cni.kubeconfig"
 readonly ca_cert="$(base64 </var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\r\n')"
 readonly namespace="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
 readonly token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+
+tokenhash=$(echo $token | sha512sum)
+ca_certhash=$(echo $ca_cert | sha512sum)
 
 if [[ -z "${KUBERNETES_APISERVER_ENDPOINT}" ]]; then
   echo "environment variable KUBERNETES_APISERVER_ENDPOINT not set - aborting" >&2
@@ -44,4 +47,13 @@ EOF
 
 chmod 0600 "${kubeconfig_install_path}"
 
-while : ; do sleep 3600; done
+while : ; do sleep 3600; 
+    tokenhashnew=$(echo $token | sha512sum)
+    ca_certhashnew=$(echo $ca_cert | sha512sum)
+    if test "$tokenahshnew" -ne "$tokenhash"; then
+	    exit 1;
+    fi
+    if test "$ca_certhashnew" -ne "$ca_certhash"; then
+	    exit 1;
+    fi
+done

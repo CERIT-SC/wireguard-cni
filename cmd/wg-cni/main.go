@@ -38,6 +38,7 @@ import (
 
 	"github.com/schu/wireguard-cni/pkg/k8sutil"
 	wgnetlink "github.com/schu/wireguard-cni/pkg/netlink"
+	"github.com/containernetworking/plugins/pkg/ip"
 )
 
 func init() {
@@ -214,8 +215,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("could not get container net ns handle: %v", err)
 	}
 
-	linkName := args.IfName
-	iface.Name = linkName
+	linkName, err := ip.RandomVethName()
+	if err != nil {
+		return err
+	}
+	iface.Name = args.IfName
 
 	linkAttrs := netlink.NewLinkAttrs()
 	linkAttrs.Name = linkName
@@ -224,7 +228,7 @@ func cmdAdd(args *skel.CmdArgs) error {
 		LinkAttrs: linkAttrs,
 	}
 	if err := netlink.LinkAdd(wgLink); err != nil {
-		return fmt.Errorf("could not create wg network interface: %v", err)
+		return fmt.Errorf("could not create wg network interface %v: %v", linkName, err)
 	}
 
 	sourceIP, sourceIPNet, err := net.ParseCIDR(wgConfig.Address)
@@ -259,7 +263,11 @@ func cmdAdd(args *skel.CmdArgs) error {
 	}
 
 	if err := netnsNetlinkHandle.AddrAdd(wgLink, addr); err != nil {
-	return fmt.Errorf("could not add address: %v", err)
+	        return fmt.Errorf("could not add address: %v", err)
+	}
+
+	if err := netnsNetlinkHandle.LinkSetName(wgLink, iface.Name); err != nil {
+	        return fmt.Errorf("failed to rename interface to %q: %v", iface.Name, err)
 	}
 
 	if err := netnsNetlinkHandle.LinkSetUp(wgLink); err != nil {
@@ -307,9 +315,25 @@ func cmdDel(args *skel.CmdArgs) error {
 	}
 	_ = conf
 
-	// Do your delete here
+	netnsHandle, err := netns.GetFromPath(args.Netns)
+        if err != nil {
+                return fmt.Errorf("could not get container net ns handle: %v", err)
+        }
 
-	return nil
+	netnsNetlinkHandle, err := netlink.NewHandleAt(netnsHandle)
+        if err != nil {
+                return fmt.Errorf("could not get container net ns netlink handle: %v", err)
+        }
+
+	link, err := netnsNetlinkHandle.LinkByName(args.IfName)
+	if err != nil {
+                return nil
+        }
+
+	if err := netnsNetlinkHandle.LinkDel(link); err != nil {
+		return fmt.Errorf("could not remove wg network interface %v: %v", args.IfName, err)
+        }
+        return nil
 }
 
 func main() {
