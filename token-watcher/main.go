@@ -124,9 +124,10 @@ func watchTokenFile() error {
 				return fmt.Errorf("watcher events channel closed")
 			}
 
-			if event.Has(fsnotify.Create) || event.Has(fsnotify.Write) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Chmod) {
-				fmt.Printf("Detected token rotation event on %s (%s), regenerating kubeconfig...\n", event.Name, event.Op.String())
-				// Small delay to allow the symlink update and file content to settle
+			// Only react to CREATE events on ..data, which is the final atomic swap in token rotation
+			if filepath.Base(event.Name) == "..data" && event.Has(fsnotify.Create) {
+				fmt.Printf("Detected token rotation (..data CREATE), regenerating kubeconfig...\n")
+				// Small delay to allow the file content to settle
 				time.Sleep(50 * time.Millisecond)
 				if err := generateKubeconfig(); err != nil {
 					fmt.Fprintf(os.Stderr, "Error generating kubeconfig: %v\n", err)
