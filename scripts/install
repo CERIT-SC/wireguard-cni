@@ -3,7 +3,6 @@
 set -o errexit
 set -o nounset
 set -o pipefail
-set -x
 
 readonly binary_install_path="/host/opt/cni/bin/"
 
@@ -11,26 +10,22 @@ if [[ -w "${binary_install_path}" ]]; then
   cp /opt/cni/bin/wg-cni "${binary_install_path}/wg-cni"
 fi
 
-readonly kubeconfig_install_path="/host/etc/cni/net.d/wg-cni.kubeconfig"
-readonly ca_cert="$(base64 </var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\r\n')"
-readonly namespace="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
-readonly token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
-
-tokenhash=$(echo $token | sha512sum)
-ca_certhash=$(echo $ca_cert | sha512sum)
-
 if [[ -z "${KUBERNETES_APISERVER_ENDPOINT}" ]]; then
   echo "environment variable KUBERNETES_APISERVER_ENDPOINT not set - aborting" >&2
   exit 1
 fi
 
-cat >"${kubeconfig_install_path}" <<EOF
+readonly kubeconfig_install_path="/host/etc/cni/net.d/wg-cni.kubeconfig"
+readonly namespace="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
+
+write_kubeconfig() {
+  cat >"${kubeconfig_install_path}" <<EOF
 apiVersion: v1
 kind: Config
 clusters:
 - name: default-cluster
   cluster:
-    certificate-authority-data: ${ca_cert}
+    certificate-authority-data: $(base64 </var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\r\n')
     server: ${KUBERNETES_APISERVER_ENDPOINT}
 contexts:
 - name: default-context
@@ -42,18 +37,28 @@ current-context: default-context
 users:
 - name: default-user
   user:
-    token: ${token}
+    token: $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
 EOF
+  chmod 0600 "${kubeconfig_install_path}"
+}
 
-chmod 0600 "${kubeconfig_install_path}"
+tokenhash=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token | sha512sum)
+ca_certhash=$(base64 </var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\r\n' | sha512sum)
 
-while : ; do sleep 3600; 
-    tokenhashnew=$(echo $token | sha512sum)
-    ca_certhashnew=$(echo $ca_cert | sha512sum)
-    if test "$tokenahshnew" -ne "$tokenhash"; then
-	    exit 1;
-    fi
-    if test "$ca_certhashnew" -ne "$ca_certhash"; then
-	    exit 1;
-    fi
+write_kubeconfig
+
+while : ; do
+  sleep 3400
+  tokenhashnew=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token | sha512sum)
+  ca_certhashnew=$(base64 </var/run/secrets/kubernetes.io/serviceaccount/ca.crt | tr -d '\r\n' | sha512sum)
+  if test "$tokenhashnew" != "$tokenhash"; then
+    echo "Token changed. Updating kubeconfig"
+    tokenhash="$tokenhashnew"
+    write_kubeconfig
+  fi
+  if test "$ca_certhashnew" != "$ca_certhash"; then
+    echo "CA cert changed. Updating kubeconfig"
+    ca_certhash="$ca_certhashnew"
+    write_kubeconfig
+  fi
 done

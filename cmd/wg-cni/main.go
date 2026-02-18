@@ -23,6 +23,7 @@ import (
 	"log"
 	"net"
 	"time"
+	"os"
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
@@ -112,14 +113,19 @@ type kubernetesArgs struct {
 }
 
 type wgCNIConfig struct {
-	Address    string `json:"address"`
-	PrivateKey string `json:"privateKey"`
+	Address    interface{} `json:"address"` // Can be string or []string
+	PrivateKey string      `json:"privateKey"`
 	Peers      []struct {
 		Endpoint            string   `json:"endpoint"`
 		PublicKey           string   `json:"publicKey"`
 		PersistentKeepalive string   `json:"persistentKeepalive"`
 		AllowedIPs          []string `json:"allowedIPs"`
 	} `json:"peers"`
+}
+
+type sourceAddress struct {
+	IP   net.IP
+	Mask net.IPMask
 }
 
 // cmdAdd is called for ADD requests
@@ -193,11 +199,20 @@ func cmdAdd(args *skel.CmdArgs) error {
 			return fmt.Errorf("could not parse endpoint %q: %v", peerConf.Endpoint, err)
 		}
 
+		// Deduplicate AllowedIPs
+		seenIPs := make(map[string]bool)
 		for _, allowedIP := range peerConf.AllowedIPs {
 			_, ipnet, err := net.ParseCIDR(allowedIP)
 			if err != nil {
 				return fmt.Errorf("could not parse CIDR %q: %v", allowedIP, err)
 			}
+
+			ipNetStr := ipnet.String()
+			if seenIPs[ipNetStr] {
+				log.Printf("Warning: duplicate AllowedIP %q found, ignoring", ipNetStr)
+				continue
+			}
+			seenIPs[ipNetStr] = true
 
 			peer.AllowedIPs = append(peer.AllowedIPs, *ipnet)
 		}
@@ -231,16 +246,31 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("could not create wg network interface %v: %v", linkName, err)
 	}
 
-	sourceIP, sourceIPNet, err := net.ParseCIDR(wgConfig.Address)
-	if err != nil {
-		return fmt.Errorf("could not parse cidr %q: %v", wgConfig.Address, err)
-	}
-
-	addr := &netlink.Addr{
-		IPNet: &net.IPNet{
-			IP:   sourceIP,
-			Mask: sourceIPNet.Mask,
-		},
+	// Parse source addresses - can be single string or array of strings
+	var sourceAddresses []sourceAddress
+	switch v := wgConfig.Address.(type) {
+	case string:
+		// Single address
+		sourceIP, sourceIPNet, err := net.ParseCIDR(v)
+		if err != nil {
+			return fmt.Errorf("could not parse cidr %q: %v", v, err)
+		}
+		sourceAddresses = append(sourceAddresses, sourceAddress{IP: sourceIP, Mask: sourceIPNet.Mask})
+	case []interface{}:
+		// Array of addresses
+		for _, addrInterface := range v {
+			addrStr, ok := addrInterface.(string)
+			if !ok {
+				return fmt.Errorf("address element is not a string: %v", addrInterface)
+			}
+			sourceIP, sourceIPNet, err := net.ParseCIDR(addrStr)
+			if err != nil {
+				return fmt.Errorf("could not parse cidr %q: %v", addrStr, err)
+			}
+			sourceAddresses = append(sourceAddresses, sourceAddress{IP: sourceIP, Mask: sourceIPNet.Mask})
+		}
+	default:
+		return fmt.Errorf("address must be a string or an array of strings, got %T", wgConfig.Address)
 	}
 
 	wgClient, err := wgctrl.New()
@@ -262,12 +292,29 @@ func cmdAdd(args *skel.CmdArgs) error {
 		return fmt.Errorf("could not get container net ns netlink handle: %v", err)
 	}
 
-	if err := netnsNetlinkHandle.AddrAdd(wgLink, addr); err != nil {
-	        return fmt.Errorf("could not add address: %v", err)
+	// Add all source addresses to the interface
+	var resultIPConfigs []*current.IPConfig
+	for _, srcAddr := range sourceAddresses {
+		addr := &netlink.Addr{
+			IPNet: &net.IPNet{
+				IP:   srcAddr.IP,
+				Mask: srcAddr.Mask,
+			},
+		}
+		if err := netnsNetlinkHandle.AddrAdd(wgLink, addr); err != nil {
+			return fmt.Errorf("could not add address %v: %v", addr, err)
+		}
+
+		resultIPConfigs = append(resultIPConfigs, &current.IPConfig{
+			Address: net.IPNet{
+				IP:   srcAddr.IP,
+				Mask: srcAddr.Mask,
+			},
+		})
 	}
 
 	if err := netnsNetlinkHandle.LinkSetName(wgLink, iface.Name); err != nil {
-	        return fmt.Errorf("failed to rename interface to %q: %v", iface.Name, err)
+		return fmt.Errorf("failed to rename interface to %q: %v", iface.Name, err)
 	}
 
 	if err := netnsNetlinkHandle.LinkSetUp(wgLink); err != nil {
@@ -278,7 +325,18 @@ func cmdAdd(args *skel.CmdArgs) error {
 		for _, allowedIP := range peer.AllowedIPs {
 			// For the source IP CIDR there is a route
 			// already from `ip addr add ...` above.
-			if allowedIP.Contains(sourceIP) {
+			// Skip if allowedIP contains any of our source addresses
+			var isSourceIP bool
+			for _, srcAddr := range sourceAddresses {
+				// Match IP family: IPv4 routes with IPv4 source, IPv6 routes with IPv6 source
+				if (srcAddr.IP.To4() == nil) == (allowedIP.IP.To4() == nil) {
+					if allowedIP.Contains(srcAddr.IP) {
+						isSourceIP = true
+						break
+					}
+				}
+			}
+			if isSourceIP {
 				continue
 			}
 
@@ -293,15 +351,8 @@ func cmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
-	resultIPConfig := &current.IPConfig{
-		Address: net.IPNet{
-                        IP:   sourceIP,
-                        Mask: sourceIPNet.Mask,
-                },
-	}
-
 	result := &current.Result{CNIVersion: conf.CNIVersion, Interfaces: []*current.Interface{iface}}
-	result.IPs = []*current.IPConfig{resultIPConfig}
+	result.IPs = resultIPConfigs
 
 	// Pass through the result for the next plugin
 	return cniTypes.PrintResult(result, conf.CNIVersion)
@@ -337,6 +388,8 @@ func cmdDel(args *skel.CmdArgs) error {
 }
 
 func main() {
+	os.Setenv("HTTPS_PROXY", "")
+	os.Setenv("HTTP_PROXY", "")
 	// TODO: implement plugin version
 	skel.PluginMain(cmdAdd, cmdGet, cmdDel, version.All, "TODO")
 }
