@@ -16,6 +16,8 @@ const (
 	caCertFile         = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	namespaceFile      = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 	outputKubeconfig   = "/host/etc/cni/net.d/wg-cni.kubeconfig"
+	wgCNIBinSource     = "/opt/cni/bin/wg-cni"
+	wgCNIBinDest       = "/host/opt/cni/bin/wg-cni"
 	kubeconfigTemplate = `apiVersion: v1
 kind: Config
 clusters:
@@ -44,6 +46,28 @@ func getEnvOrDie(key string) string {
 		os.Exit(1)
 	}
 	return val
+}
+
+func installWgCNIBinary() error {
+	// Read source binary
+	data, err := os.ReadFile(wgCNIBinSource)
+	if err != nil {
+		return fmt.Errorf("failed to read wg-cni binary from %s: %w", wgCNIBinSource, err)
+	}
+
+	// Ensure destination directory exists
+	destDir := filepath.Dir(wgCNIBinDest)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Write binary with executable permissions
+	if err := os.WriteFile(wgCNIBinDest, data, 0755); err != nil {
+		return fmt.Errorf("failed to write wg-cni binary to %s: %w", wgCNIBinDest, err)
+	}
+
+	fmt.Printf("Successfully installed wg-cni binary to %s\n", wgCNIBinDest)
+	return nil
 }
 
 func readFile(path string) (string, error) {
@@ -96,6 +120,11 @@ func generateKubeconfig() error {
 }
 
 func watchTokenFile() error {
+	// Install wg-cni binary once at the beginning
+	if err := installWgCNIBinary(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to install wg-cni binary: %v\n", err)
+	}
+
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create watcher: %w", err)
